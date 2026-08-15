@@ -21,9 +21,41 @@
 #include "Trace.hpp"
 #include "Utils.hpp"
 
+#include <atomic>
+
 namespace ZeroTier {
 
 static unsigned char s_freeRandomByteCounter = 0;
+
+/* settings.forceSalsaPeers -- see Peer.hpp. Written once when local.conf is
+ * (re)loaded and read on every outgoing packet, so it is kept as a small flat
+ * array guarded by an atomic count rather than a mutex: the count is published
+ * after the addresses are in place, so a reader either sees the old list or a
+ * complete new one. */
+#define ZT_MAX_FORCE_SALSA_PEERS 32
+static uint64_t s_forceSalsaPeers[ZT_MAX_FORCE_SALSA_PEERS];
+static std::atomic<unsigned int> s_forceSalsaPeerCount(0);
+
+void setForceSalsaPeers(const std::vector<uint64_t>& peers)
+{
+	s_forceSalsaPeerCount.store(0, std::memory_order_release);
+	unsigned int n = 0;
+	for (std::vector<uint64_t>::const_iterator i(peers.begin()); (i != peers.end()) && (n < ZT_MAX_FORCE_SALSA_PEERS); ++i) {
+		s_forceSalsaPeers[n++] = *i;
+	}
+	s_forceSalsaPeerCount.store(n, std::memory_order_release);
+}
+
+bool forceSalsaForPeer(uint64_t address)
+{
+	const unsigned int n = s_forceSalsaPeerCount.load(std::memory_order_acquire);
+	for (unsigned int i = 0; i < n; ++i) {
+		if (s_forceSalsaPeers[i] == address) {
+			return true;
+		}
+	}
+	return false;
+}
 
 Peer::Peer(const RuntimeEnvironment* renv, const Identity& myIdentity, const Identity& peerIdentity)
 	: RR(renv)
