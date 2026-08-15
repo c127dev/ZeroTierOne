@@ -32,6 +32,14 @@
 
 namespace ZeroTier {
 
+/* Peers listed in local.conf as settings.forceSalsaPeers are never sent
+ * AES-GMAC-SIV, even if we have hardware AES. Used when the far end is a CPU
+ * without AES-NI, where software AES is several times slower than
+ * SALSA2012/POLY1305 and the far end pays that cost on every packet it
+ * receives. Defined in Peer.cpp. */
+void setForceSalsaPeers(const std::vector<uint64_t>& peers);
+bool forceSalsaForPeer(uint64_t address);
+
 /**
  * Peer on P2P Network (virtual layer 1)
  */
@@ -657,6 +665,22 @@ class Peer {
 	inline const AES* aesKeysIfSupported() const
 	{
 		return (_vProto >= 12) ? _aesKeys : (const AES*)0;
+	}
+
+	/* Same as aesKeysIfSupported() but also requires that AES-GMAC-SIV is
+	 * actually the cheaper choice for this link: we must be able to do AES in
+	 * hardware, and the peer must not be listed in settings.forceSalsaPeers
+	 * (which marks peers that cannot). On a CPU without AES-NI the software
+	 * AES-GMAC-SIV path is several times slower than SALSA2012/POLY1305.
+	 * Transmit-side only: the receive paths keep using
+	 * aesKeysIfSupported()/aesKeys(), so we still decrypt AES from peers that
+	 * chose it. */
+	inline const AES* aesKeysForTx() const
+	{
+		if ((! AES::accelerated()) || forceSalsaForPeer(_id.address().toInt())) {
+			return (const AES*)0;
+		}
+		return aesKeysIfSupported();
 	}
 
 	inline const AES* aesKeys() const

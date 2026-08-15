@@ -2924,6 +2924,22 @@ class OneServiceImpl : public OneService {
 		_cpuPinningEnabled = false;
 #endif
 
+		// Peers that must never be sent AES-GMAC-SIV because their CPU has no
+		// AES-NI and would have to decrypt it in software. See Peer.hpp.
+		{
+			std::vector<uint64_t> forceSalsaPeers;
+			json& fsp = settings["forceSalsaPeers"];
+			if (fsp.is_array()) {
+				for (unsigned long i = 0; i < fsp.size(); ++i) {
+					const std::string tmp(OSUtils::jsonString(fsp[i], ""));
+					if (tmp.length() > 0) {
+						forceSalsaPeers.push_back(Utils::hexStrToU64(tmp.c_str()) & 0xffffffffffULL);
+					}
+				}
+			}
+			setForceSalsaPeers(forceSalsaPeers);
+		}
+
 		json& ignoreIfs = settings["interfacePrefixBlacklist"];
 		if (ignoreIfs.is_array()) {
 			for (unsigned long i = 0; i < ignoreIfs.size(); ++i) {
