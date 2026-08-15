@@ -20,6 +20,7 @@
 #include "LinuxEthernetTap.hpp"
 #include "LinuxNetLink.hpp"
 #include "OSUtils.hpp"
+#include "UdpGso.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -313,6 +314,11 @@ LinuxEthernetTap::LinuxEthernetTap(
 			FD_ZERO(&nullfds);
 			nfds = (int)std::max(_shutdownSignalPipe[0], _fd) + 1;
 
+			// Outbound packets are produced synchronously on this thread by
+			// _handler(), so this thread can batch its UDP writes as long as it
+			// flushes whenever the tap runs dry. See UdpGso.hpp.
+			UdpGso::armThread();
+
 			r = 0;
 			for (;;) {
 				FD_SET(_shutdownSignalPipe[0], &readfds);
@@ -345,6 +351,9 @@ LinuxEthernetTap::LinuxEthernetTap(
 							}
 						}
 						else {
+							// Tap is dry. Whatever the burst above queued has to
+							// go out now, before we block again in select().
+							UdpGso::flush();
 							r = 0;
 							break;
 						}

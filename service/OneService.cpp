@@ -3287,6 +3287,11 @@ class OneServiceImpl : public OneService {
 			setForceSalsaPeers(forceSalsaPeers);
 		}
 
+		// Coalesce outbound UDP into UDP_SEGMENT writes on the tap threads.
+		// Off by default: it only pays when consecutive packets to one peer are
+		// the same size, so it wants a network MTU that does not fragment.
+		UdpGso::setEnabled(OSUtils::jsonBool(settings["udpGsoEnabled"], false));
+
 		json& ignoreIfs = settings["interfacePrefixBlacklist"];
 		if (ignoreIfs.is_array()) {
 			for (unsigned long i = 0; i < ignoreIfs.size(); ++i) {

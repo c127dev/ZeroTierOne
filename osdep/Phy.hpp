@@ -32,6 +32,7 @@
 #else	// not Windows
 
 #include "../node/Metrics.hpp"
+#include "UdpGso.hpp"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -399,7 +400,12 @@ template <typename HANDLER_PTR_TYPE> class Phy {
 			// For now at least we only set SO_NO_CHECK on IPv4 sockets since some
 			// IPv6 stacks incorrectly discard zero checksum packets. May remove
 			// this restriction later once broken stuff dies more.
-			if ((localAddress->sa_family == AF_INET) && (_noCheck)) {
+			// SO_NO_CHECK and UDP_SEGMENT are mutually exclusive: the kernel
+			// rejects a segmented sendmsg with EINVAL on a socket that has
+			// checksums disabled, since it has to write a checksum into each
+			// segment it creates. Batching is worth far more than the checksum
+			// it costs, so GSO wins when both are asked for.
+			if ((localAddress->sa_family == AF_INET) && (_noCheck) && (! UdpGso::enabled())) {
 				f = 1;
 				setsockopt(s, SOL_SOCKET, SO_NO_CHECK, (void*)&f, sizeof(f));
 			}
@@ -481,6 +487,12 @@ template <typename HANDLER_PTR_TYPE> class Phy {
 #if defined(_WIN32) || defined(_WIN64)
 		sent = ((long)::sendto(sws.sock, reinterpret_cast<const char*>(data), len, 0, remoteAddress, (remoteAddress->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in)) == (long)len);
 #else
+		// On threads that armed batching this is coalesced into one UDP_SEGMENT
+		// write instead, and the caller flushes when it runs out of packets.
+		// UdpGso does its own udp_send accounting in that case.
+		if (UdpGso::offer(sws.sock, remoteAddress, data, (unsigned int)len)) {
+			return true;
+		}
 		sent = ((long)::sendto(sws.sock, data, len, 0, remoteAddress, (remoteAddress->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in)) == (long)len);
 #endif
 		if (sent) {
