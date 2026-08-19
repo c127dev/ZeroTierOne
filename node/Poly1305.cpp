@@ -17,6 +17,47 @@ Public domain.
 #pragma warning(disable : 4146)
 #endif
 
+#ifdef ZT_USE_ASM_POLY1305
+
+/* Andy Polyakov's Poly1305 assembly from OpenSSL, see ext/poly1305-asm.
+ *
+ * The exported symbols are named poly1305_init/_blocks/_emit, which collide
+ * with the static poly1305-donna functions further down this file, so they are
+ * declared here under zt_-prefixed names bound to the real symbols with asm
+ * labels. */
+
+extern "C" {
+
+struct zt_poly1305_asm_func {
+	void (*blocks)(void* ctx, const unsigned char* inp, size_t len, unsigned int padbit);
+	void (*emit)(void* ctx, unsigned char mac[16], const unsigned int nonce[4]);
+};
+
+/* Both targets write *func unconditionally, so it must never be NULL. A
+ * non-zero return means the pointers written there supersede the plain
+ * symbols; that is how the ARM build reaches its NEON path. */
+int zt_poly1305_asm_init(void* ctx, const unsigned char key[16], zt_poly1305_asm_func* func) __asm__("poly1305_init");
+void zt_poly1305_asm_blocks(void* ctx, const unsigned char* inp, size_t len, unsigned int padbit) __asm__("poly1305_blocks");
+void zt_poly1305_asm_emit(void* ctx, unsigned char mac[16], const unsigned int nonce[4]) __asm__("poly1305_emit");
+
+#if defined(__arm__) || defined(__thumb__)
+/* The ARM assembly reads this to decide whether to use NEON, and nothing else
+ * in ZeroTier defines it. It is deliberately NOT called OPENSSL_armcap_P: that
+ * name collides with libcrypto's own definition in any build that links
+ * libcrypto (SSO, controller). The assembly is compiled with
+ * -DOPENSSL_armcap_P=zt_openssl_armcap_P to match. Bit 0 is ARMV7_NEON. */
+unsigned int zt_openssl_armcap_P = 0;
+#define ZT_ARMV7_NEON_BIT 1u
+#endif
+
+}	// extern "C"
+
+#if defined(__arm__) || defined(__thumb__)
+#include "../ext/arm32-neon-salsa2012-asm/salsa2012.h" /* for zt_arm_has_neon() */
+#endif
+
+#endif	 // ZT_USE_ASM_POLY1305
+
 namespace ZeroTier {
 
 namespace {
@@ -590,12 +631,105 @@ static inline void poly1305_update(poly1305_context* ctx, const unsigned char* m
 
 }	// anonymous namespace
 
-void Poly1305::compute(void* auth, const void* data, unsigned int len, const void* key)
+void Poly1305::computeReference(void* auth, const void* data, unsigned int len, const void* key)
 {
 	poly1305_context ctx;
 	poly1305_init(&ctx, reinterpret_cast<const unsigned char*>(key));
 	poly1305_update(&ctx, reinterpret_cast<const unsigned char*>(data), (size_t)len);
 	poly1305_finish(&ctx, reinterpret_cast<unsigned char*>(auth));
 }
+
+#ifdef ZT_USE_ASM_POLY1305
+
+/* Below this length the assembly loses to poly1305-donna and the C code is
+ * used instead. The assembly pays for three non-inlinable calls with register
+ * saving prologues, while donna is inlined straight into this function; on a
+ * short message that fixed cost is most of the work. Measured crossover is
+ * around 128-256 bytes on both an AMD K10 and a Cortex-A15. Both paths produce
+ * identical tags, so this only ever trades speed for speed. */
+#define ZT_POLY1305_ASM_MIN_LEN 256
+
+void Poly1305::compute(void* auth, const void* data, unsigned int len, const void* key)
+{
+	if (len < ZT_POLY1305_ASM_MIN_LEN) {
+		computeReference(auth, data, len, key);
+		return;
+	}
+
+#if defined(__arm__) || defined(__thumb__)
+	/* The assembly reads OPENSSL_armcap_P inside poly1305_init(), so it has to
+	 * be set before the first call. A function-local static is initialized
+	 * exactly once and is thread safe, and is guaranteed to run before the
+	 * init() below on every path into this function. */
+	static const bool _armcapOnce = []() {
+		zt_openssl_armcap_P = (zt_arm_has_neon() ? ZT_ARMV7_NEON_BIT : 0u);
+		return true;
+	}();
+	(void)_armcapOnce;
+#endif
+
+	/* OpenSSL sizes this as double[24] purely to force 64-bit alignment. */
+	uint64_t opaque[24];
+	zt_poly1305_asm_func func;
+	unsigned int nonce[4];
+
+	const unsigned char* const k = reinterpret_cast<const unsigned char*>(key);
+	const int useFunc = zt_poly1305_asm_init(opaque, k, &func);
+
+	/* r is consumed by init() from key[0..15]; s stays here as the little
+	 * endian nonce and is added by emit(). */
+	for (int i = 0; i < 4; ++i) {
+		const unsigned char* const p = k + 16 + (i * 4);
+		nonce[i] = ((unsigned int)p[0]) | (((unsigned int)p[1]) << 8) | (((unsigned int)p[2]) << 16) | (((unsigned int)p[3]) << 24);
+	}
+
+	const unsigned char* const in = reinterpret_cast<const unsigned char*>(data);
+	const unsigned int whole = len & ~15U;
+	const unsigned int rem = len & 15U;
+
+	if (whole) {
+		if (useFunc) {
+			func.blocks(opaque, in, (size_t)whole, 1);
+		}
+		else {
+			zt_poly1305_asm_blocks(opaque, in, (size_t)whole, 1);
+		}
+	}
+
+	if (rem) {
+		/* Final partial block carries an explicit 1 byte instead of the
+		 * implicit high bit that padbit=1 supplies for whole blocks. */
+		unsigned char tail[16];
+		memcpy(tail, in + whole, rem);
+		tail[rem] = 1;
+		memset(tail + rem + 1, 0, sizeof(tail) - rem - 1);
+		if (useFunc) {
+			func.blocks(opaque, tail, sizeof(tail), 0);
+		}
+		else {
+			zt_poly1305_asm_blocks(opaque, tail, sizeof(tail), 0);
+		}
+	}
+
+	if (useFunc) {
+		func.emit(opaque, reinterpret_cast<unsigned char*>(auth), nonce);
+	}
+	else {
+		zt_poly1305_asm_emit(opaque, reinterpret_cast<unsigned char*>(auth), nonce);
+	}
+
+	/* No burn of opaque/nonce here on purpose: the poly1305-donna path this
+	 * replaces does not scrub its state either, and at these packet rates the
+	 * memset is a measurable fraction of a short packet's total cost. */
+}
+
+#else
+
+void Poly1305::compute(void* auth, const void* data, unsigned int len, const void* key)
+{
+	computeReference(auth, data, len, key);
+}
+
+#endif	 // ZT_USE_ASM_POLY1305
 
 }	// namespace ZeroTier

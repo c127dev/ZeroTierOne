@@ -36,6 +36,15 @@ class Poly1305 {
 	 * @param key 32-byte one-time use key to authenticate data (must not be reused)
 	 */
 	static void compute(void* auth, const void* data, unsigned int len, const void* key);
+
+	/**
+	 * Same as compute(), always using the portable poly1305-donna C code
+	 *
+	 * When ZT_USE_ASM_POLY1305 is not defined this is what compute() calls.
+	 * When it is, this is kept as a reference to check the assembly against;
+	 * see selftest.
+	 */
+	static void computeReference(void* auth, const void* data, unsigned int len, const void* key);
 };
 
 }	// namespace ZeroTier
