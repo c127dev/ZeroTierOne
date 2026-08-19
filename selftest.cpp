@@ -822,9 +822,8 @@ static int testCrypto()
 		return -1;
 	}
 #ifdef ZT_USE_ASM_POLY1305
-	/* Check the assembly against the poly1305-donna C code it replaces, over
-	 * every length that reaches a different path through it (whole blocks,
-	 * partial tails, empty input) and at several source alignments. */
+	/* Assembly vs donna over every length (whole blocks, partial tails, empty)
+	 * at several alignments. */
 	{
 		unsigned char pbuf[1120];
 		unsigned char pkey[32];

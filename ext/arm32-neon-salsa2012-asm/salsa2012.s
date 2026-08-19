@@ -318,7 +318,9 @@ vld1.8 {d2-d3},[r12]
 # qhasm: i = sigma
 # asm 1: ldr >i=int32#13,=sigma
 # asm 2: ldr >i=r12,=sigma
-ldr r12,=sigma
+# was: ldr r12,=sigma -- absolute address, emits a TEXTREL under -fPIE, which
+# musl's dynamic linker does not support
+adr r12,sigma
 
 # qhasm: start0 = mem128[i]
 # asm 1: vld1.8 {>start0=reg128#3%bot->start0=reg128#3%top},[<i=int32#13]
