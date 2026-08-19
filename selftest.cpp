@@ -821,6 +821,30 @@ static int testCrypto()
 		std::cout << "FAIL (2)" << std::endl;
 		return -1;
 	}
+#ifdef ZT_USE_ASM_POLY1305
+	/* Check the assembly against the poly1305-donna C code it replaces, over
+	 * every length that reaches a different path through it (whole blocks,
+	 * partial tails, empty input) and at several source alignments. */
+	{
+		unsigned char pbuf[1120];
+		unsigned char pkey[32];
+		for (unsigned int i = 0; i < sizeof(pkey); ++i)
+			pkey[i] = (unsigned char)(i * 7 + 3);
+		for (unsigned int i = 0; i < sizeof(pbuf); ++i)
+			pbuf[i] = (unsigned char)(i * 31 + 11);
+		for (unsigned int len = 0; len <= 1024; ++len) {
+			for (unsigned int off = 0; off < 16; off += 5) {
+				unsigned char tagAsm[16], tagRef[16];
+				Poly1305::compute(tagAsm, pbuf + off, len, pkey);
+				Poly1305::computeReference(tagRef, pbuf + off, len, pkey);
+				if (memcmp(tagAsm, tagRef, 16)) {
+					std::cout << "FAIL (asm != donna at len " << len << " off " << off << ")" << std::endl;
+					return -1;
+				}
+			}
+		}
+	}
+#endif
 	std::cout << "PASS" << std::endl;
 
 	std::cout << "[crypto] Benchmarking Poly1305... ";

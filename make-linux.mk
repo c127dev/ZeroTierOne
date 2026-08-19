@@ -360,6 +360,36 @@ ifeq ($(ZT_USE_ARM32_NEON_ASM_CRYPTO),1)
 	override CORE_OBJS+=ext/arm32-neon-salsa2012-asm/salsa2012.o
 endif
 
+# Poly1305 assembly (OpenSSL / Andy Polyakov, see ext/poly1305-asm). Poly1305 is
+# about a quarter of the cost of armoring a packet, and node/Poly1305.cpp drops
+# to poly1305-donna's slow 32-bit path on 32-bit targets. The wire format does
+# not change, so this interoperates with builds that lack it.
+POLY1305_ASM_OBJ=
+ifneq (,$(filter $(CC_MACH),x86_64 amd64))
+	POLY1305_ASM_OBJ=ext/poly1305-asm/poly1305-x86_64.o
+endif
+ifneq (,$(filter $(CC_MACH),arm armel armhf armv6 armv6l armv6zk armv6kz armv6k armv7 armv7l armv7hl armv7ve))
+	POLY1305_ASM_OBJ=ext/poly1305-asm/poly1305-armv4.o
+endif
+# The x86-64 assembly is 64-bit only; a forced 32-bit build must not use it.
+ifeq ($(ZT_IA32),1)
+	POLY1305_ASM_OBJ=
+endif
+ifneq ($(POLY1305_ASM_OBJ),)
+	override DEFS+=-DZT_USE_ASM_POLY1305
+	override CORE_OBJS+=$(POLY1305_ASM_OBJ)
+endif
+
+# The ARM assembly #includes arm_arch.h, so it needs that directory on the
+# include path and must go through the C preprocessor.
+#
+# OPENSSL_armcap_P is renamed because we define it ourselves: leaving OpenSSL's
+# name on it collides at link time with libcrypto's own copy ("multiple
+# definition of OPENSSL_armcap_P") in any build that also links libcrypto, such
+# as the SSO and controller builds.
+ext/poly1305-asm/%.o: ext/poly1305-asm/%.S
+	$(CC) $(CFLAGS) -Iext/poly1305-asm -DOPENSSL_armcap_P=zt_openssl_armcap_P -c -o $@ $<
+
 # Position Independence
 override CFLAGS+=-fPIC -fPIE
 override CXXFLAGS+=-fPIC -fPIE
