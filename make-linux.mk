@@ -375,6 +375,20 @@ ifeq ($(ZT_ARCHITECTURE),3)
 	endif
 endif
 
+# The ARM32 block above clears ZT_USE_ARM32_NEON_ASM_CRYPTO for all of ARM32,
+# overriding the per-triple settings further up. Re-enable it for triples that
+# are ARMv7 by definition; armel and the armv6 path stay off. Packet.cpp gates
+# each call on a runtime AT_HWCAP check (zt_arm_has_neon()).
+ifeq ($(ZT_ARCHITECTURE),3)
+	ifneq (,$(filter $(CC_MACH),armhf armv7 armv7l armv7hl armv7ve))
+		ifneq ($(ZT_EXTOSDEP),0)
+			ifneq ($(shell if [ -e /usr/bin/dpkg ]; then dpkg --print-architecture; fi),armel)
+				ZT_USE_ARM32_NEON_ASM_CRYPTO=1
+			endif
+		endif
+	endif
+endif
+
 # Build faster crypto on some targets
 ifeq ($(ZT_USE_X64_ASM_SALSA),1)
 	override DEFS+=-DZT_USE_X64_ASM_SALSA2012
@@ -389,10 +403,13 @@ ifeq ($(ZT_USE_ARM32_NEON_ASM_CRYPTO),1)
 	override CORE_OBJS+=ext/arm32-neon-salsa2012-asm/salsa2012.o
 endif
 
-# Poly1305 assembly (OpenSSL / Andy Polyakov, see ext/poly1305-asm). Poly1305 is
-# about a quarter of the cost of armoring a packet, and node/Poly1305.cpp drops
-# to poly1305-donna's slow 32-bit path on 32-bit targets. The wire format does
-# not change, so this interoperates with builds that lack it.
+# The .s carries ".fpu neon" but the assembler still needs an ARMv7 -march,
+# which the ARM32 CFLAGS above do not necessarily supply.
+ext/arm32-neon-salsa2012-asm/salsa2012.o: ext/arm32-neon-salsa2012-asm/salsa2012.s
+	$(CC) $(CFLAGS) -march=armv7-a -mfpu=neon -c -o $@ $<
+
+# Poly1305 assembly, see ext/poly1305-asm. node/Poly1305.cpp otherwise drops to
+# poly1305-donna's 32-bit path on 32-bit targets. Wire format is unchanged.
 POLY1305_ASM_OBJ=
 ifneq (,$(filter $(CC_MACH),x86_64 amd64))
 	POLY1305_ASM_OBJ=ext/poly1305-asm/poly1305-x86_64.o
@@ -409,13 +426,8 @@ ifneq ($(POLY1305_ASM_OBJ),)
 	override CORE_OBJS+=$(POLY1305_ASM_OBJ)
 endif
 
-# The ARM assembly #includes arm_arch.h, so it needs that directory on the
-# include path and must go through the C preprocessor.
-#
-# OPENSSL_armcap_P is renamed because we define it ourselves: leaving OpenSSL's
-# name on it collides at link time with libcrypto's own copy ("multiple
-# definition of OPENSSL_armcap_P") in any build that also links libcrypto, such
-# as the SSO and controller builds.
+# The ARM .S includes arm_arch.h. OPENSSL_armcap_P is renamed because we define
+# it ourselves; OpenSSL's name collides with libcrypto's copy when both link.
 ext/poly1305-asm/%.o: ext/poly1305-asm/%.S
 	$(CC) $(CFLAGS) -Iext/poly1305-asm -DOPENSSL_armcap_P=zt_openssl_armcap_P -c -o $@ $<
 
