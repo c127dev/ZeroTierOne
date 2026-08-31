@@ -123,6 +123,9 @@ endif
 
 # Determine system build architecture from compiler target. This is hairy due to "ARM wrestling."
 CC_MACH=$(shell $(CC) -dumpmachine | cut -d '-' -f 1)
+# A Debian armhf toolchain reports plain "arm", which says nothing about the
+# ISA. Its ABI suffix does: eabihf implies an ARMv7-A hard-float baseline.
+CC_MACH_ARMHF=$(shell $(CC) -dumpmachine | grep -q 'eabihf$$' && echo arm-eabihf)
 ZT_ARCHITECTURE=999
 ifeq ($(CC_MACH),x86_64)
 	ZT_ARCHITECTURE=2
@@ -380,7 +383,7 @@ endif
 # are ARMv7 by definition; armel and the armv6 path stay off. Packet.cpp gates
 # each call on a runtime AT_HWCAP check (zt_arm_has_neon()).
 ifeq ($(ZT_ARCHITECTURE),3)
-	ifneq (,$(filter $(CC_MACH),armhf armv7 armv7l armv7hl armv7ve))
+	ifneq (,$(filter $(CC_MACH) $(CC_MACH_ARMHF),armhf armv7 armv7l armv7hl armv7ve arm-eabihf))
 		ifneq ($(ZT_EXTOSDEP),0)
 			ifneq ($(shell if [ -e /usr/bin/dpkg ]; then dpkg --print-architecture; fi),armel)
 				ZT_USE_ARM32_NEON_ASM_CRYPTO=1
@@ -402,7 +405,7 @@ endif
 #   make ZT_ARM_NEON=1
 ifeq ($(ZT_ARM_NEON),1)
 	ifeq ($(ZT_ARCHITECTURE),3)
-		ifneq (,$(filter $(CC_MACH),armhf armv7 armv7l armv7hl armv7ve))
+		ifneq (,$(filter $(CC_MACH) $(CC_MACH_ARMHF),armhf armv7 armv7l armv7hl armv7ve arm-eabihf))
 			ifneq ($(ZT_EXTOSDEP),0)
 				ifneq ($(shell if [ -e /usr/bin/dpkg ]; then dpkg --print-architecture; fi),armel)
 					override CFLAGS+=-march=armv7-a -mfpu=neon
