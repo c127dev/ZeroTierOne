@@ -109,10 +109,10 @@ jobs:
           echo "board images: $boards" >> "$GITHUB_STEP_SUMMARY"
 
   # One job per architecture, each on the runner that builds it natively where
-  # one exists. arm64 sets ZT_SSO_SUPPORTED=1 in make-linux.mk, so it compiles
-  # zeroidc with cargo; under qemu that alone took longer than every other job
-  # combined. armv7 and riscv64 have no native runner, but they also build no
-  # rust, so emulation stays tolerable.
+  # one exists. The Dockerfile builds with ZT_SSO_SUPPORTED=0, so no job
+  # compiles zeroidc with cargo any more, but a native runner still finishes an
+  # emulated C++ build's work in a fraction of the time. armv7 and riscv64 have
+  # no hosted runner and stay emulated.
   build:
     needs: plan
     runs-on: ${{ matrix.runner }}

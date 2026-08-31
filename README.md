@@ -1,5 +1,9 @@
 # ZeroTier One compiler branch
 
+The image is Alpine and musl, roughly 20 MB, so it fits a RouterOS container
+store that lives on a RAM disk. The entrypoint takes its whole configuration
+from the environment; see "Run".
+
 Start `c127-build.yml` from the Actions tab with this branch selected, or over HTTP
 with a fine-grained token holding Actions read and write:
 
@@ -70,17 +74,40 @@ podman build -f .compiler/Dockerfile \
 ```bash
 podman run -d --name zerotier-one \
     --cap-add NET_ADMIN --device /dev/net/tun \
-    -v zerotier-one:/var/lib/zerotier-one \
+    -v zt-identity:/zt-identity \
     -p 9993:9993/udp \
+    -e ZT_NETWORKS=d3ecf5726d00d4f0 \
+    -e ZT_FORCE_SALSA_PEERS=8d4814ff8f \
     ghcr.io/c127dev/zerotierone:latest
 ```
 
-`ZEROTIER_LOCAL_CONF` is written to `local.conf` at startup, which is where the
-Salsa peer list goes:
+Only `/zt-identity` has to persist. `local.conf` is rewritten from the
+environment on every start, so the image carries no configuration and a setting
+is changed by restarting with a different value.
 
-```bash
--e ZEROTIER_LOCAL_CONF='{"settings":{"forceSalsaPeers":["deadbeef00"]}}'
-```
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ZT_NETWORKS` | none | Networks to join, comma or space separated |
+| `ZT_IDENTITY_DIR` | `/zt-identity` | Where the identity is kept, seeded on first start |
+| `ZT_PORT` | `9993` | `primaryPort` |
+| `ZT_FORCE_SALSA_PEERS` | none | `forceSalsaPeers`, the peers kept off AES-GMAC-SIV |
+| `ZT_UDP_GSO` | `false` | `udpGsoEnabled` |
+| `ZT_MULTICORE` | `false` | `multicoreEnabled` |
+| `ZT_CONCURRENCY` | `1` | `concurrency`, only read when multicore is on |
+| `ZT_CPU_PINNING` | `false` | `cpuPinningEnabled` |
+| `ZT_ALLOW_TCP_FALLBACK` | `true` | `allowTcpFallbackRelay` |
+| `ZT_FORCE_TCP_RELAY` | `false` | `forceTcpRelay` |
+| `ZT_PORT_MAPPING` | `true` | `portMappingEnabled` |
+| `ZT_IFACE_BLACKLIST` | none | `interfacePrefixBlacklist` |
+| `ZT_IP_FORWARD` | `false` | `sysctl net.ipv4.ip_forward=1` |
+| `ZT_ROUTES` | none | `<cidr> via <gw>` entries, reapplied every 15s |
+| `ZT_LOCAL_CONF` | none | Raw `local.conf` JSON, overrides every setting above |
+
+`ZT_ROUTES` is reapplied on a loop because the `zt*` interface is recreated
+whenever network membership changes, which drops routes pinned to it.
+
+SSO is not built (`ZT_SSO_SUPPORTED=0`): zeroidc needs a glibc Rust toolchain
+and the image is musl.
 
 ## RouterOS v7
 
@@ -96,10 +123,25 @@ writable `root-dir` such as a USB or NVMe partition.
 # The host goes in registry-url, not in remote-image. RouterOS prepends it.
 /container/config/set registry-url=https://ghcr.io tmpdir=usb1/pull
 
+/container/envs/add list=ztnode key=ZT_NETWORKS value=d3ecf5726d00d4f0
+/container/envs/add list=ztnode key=ZT_FORCE_SALSA_PEERS value=8d4814ff8f
+/container/envs/add list=ztnode key=ZT_UDP_GSO value=true
+/container/envs/add list=ztnode key=ZT_MULTICORE value=true
+/container/envs/add list=ztnode key=ZT_CONCURRENCY value=4
+
+# The identity is the only state worth keeping off the container store.
+/container/mounts/add name=ztid src=/ztid dst=/zt-identity
+
 /container/add remote-image=c127dev/zerotierone:rb4011igs \
-    interface=veth-zt root-dir=usb1/zerotier logging=yes
+    interface=veth-zt envlist=ztnode mountlist=ztid \
+    root-dir=usb1/zerotier logging=yes
 /container/start 0
 ```
+
+`root-dir` on a tmpfs works and keeps the writes off the NAND, but size it for
+the image: the store holds the downloaded layers and the extracted rootfs at
+once. A 100 MB RAM disk is enough for this image and was not for a
+debian-slim one.
 
 An offline device takes the image as a file instead. Download
 `zerotier-one-rb4011igs-tuned.tar.gz` from a release, `gunzip` it, upload it:
