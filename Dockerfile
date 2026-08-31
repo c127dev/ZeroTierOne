@@ -1,7 +1,7 @@
 # Build context is a checkout of mikrozt1; this file lives on the compiler
 # branch and is passed by path.
 
-FROM debian:bookworm AS build
+FROM debian:trixie AS build
 
 RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends \
@@ -33,7 +33,7 @@ RUN make clean \
         CFLAGS="-O3 -fstack-protector ${ZT_TUNE}" \
         CXXFLAGS="-O3 -fstack-protector ${ZT_TUNE}"
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends \

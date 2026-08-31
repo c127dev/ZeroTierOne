@@ -13,8 +13,10 @@ curl -X POST \
 ```
 
 It checks out `mikrozt1` for the source and this branch for the `Dockerfile`,
-then publishes `linux/amd64`, `linux/arm64` and `linux/arm/v7` to GHCR, plus one
-tuned image per board that sets `ZT_VARIANT`.
+then publishes `linux/amd64`, `linux/arm64`, `linux/arm/v7` and `linux/riscv64`
+to GHCR and to Docker Hub, plus one tuned image per board that sets
+`ZT_VARIANT`. Each architecture is built on its own runner and the four are
+joined into one multi-architecture tag afterwards.
 
 Pushing to this branch starts a run that skips every job. That run exists only
 to keep the workflow registered, since a dispatch cannot reach a workflow GitHub
@@ -22,19 +24,28 @@ has never indexed.
 
 ## Tags
 
+The version is the upstream version from `version.h` with the run number
+appended, so every build gets its own: `1.16.2.7` is upstream 1.16.2 built by
+run 7.
+
 | Tag | Contents |
 | --- | --- |
-| `latest` | Last stable release |
-| `edge` | Last pre-release, that is, any build that did not change `version.h` |
-| `v<version>` | A stable release |
-| `v<version>-pre.<run>` | A pre-release |
+| `latest` | Last build |
+| `<version>` | That build, for example `1.16.2.7` |
 | `sha-<short>` | The commit of `mikrozt1` it was built from |
 | `<variant>` | Last build tuned for that board |
-| `v<version>-<variant>` | That board at that version |
+| `<version>-<variant>` | That board at that version |
 
-Every release carries `zerotier-one-amd64.tar.gz`, `zerotier-one-arm64.tar.gz`,
-`zerotier-one-armv7.tar.gz` and one `zerotier-one-<variant>-tuned.tar.gz` per
-board, for devices that cannot pull from a registry.
+`latest` and `<version>` also land on `docker.io/c127/zerotierone`, copied from
+the GHCR index rather than rebuilt, so the digests match. The board tags are
+GHCR only. Docker Hub is skipped when `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN` are unset.
+
+The release is tagged `v<version>` and titled `ZeroTier One <version>`. It
+carries `zerotier-one-amd64.tar.gz`, `zerotier-one-arm64.tar.gz`,
+`zerotier-one-armv7.tar.gz`, `zerotier-one-riscv64.tar.gz` and one
+`zerotier-one-<variant>-tuned.tar.gz` per board, for devices that cannot pull
+from a registry.
 
 ## Local build
 
