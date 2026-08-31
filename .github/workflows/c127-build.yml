@@ -1,0 +1,383 @@
+name: c127-build
+
+# The file name must not collide with a workflow on the source branch. GitHub
+# keys a workflow by its path across every ref, so sharing a name with
+# upstream's build.yml would make disabling that one disable this one too.
+#
+# mikrozt1 carries source only, so nothing there triggers this. Builds start
+# from a dispatch: the Actions tab with this branch selected, or a fine-grained
+# token holding Actions read and write:
+# POST /repos/{owner}/{repo}/actions/workflows/c127-build.yml/dispatches {"ref":"compiler"}
+#
+# The push trigger exists so GitHub keeps this workflow registered. It only
+# indexes a dispatchable workflow it has seen on the default branch or seen
+# run, and the source branch holds no workflow file for it. Every job is gated
+# on the event, so a push to this branch registers the workflow and builds
+# nothing.
+on:
+  workflow_dispatch:
+  push:
+    branches: [compiler]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  SOURCE_BRANCH: mikrozt1
+
+jobs:
+  plan:
+    # A push to this branch registers the workflow and stops here. Every other
+    # job needs plan, so they all skip with it.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      stable: ${{ steps.plan.outputs.stable }}
+      last: ${{ steps.plan.outputs.last }}
+      tags: ${{ steps.plan.outputs.tags }}
+      sha: ${{ steps.plan.outputs.sha }}
+      boards: ${{ steps.plan.outputs.boards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_BRANCH }}
+
+      - name: Read version.h and compare against the last stable release
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Resolved once here: every job checks out the source branch, and a
+          # dispatch on the compiler branch makes GITHUB_SHA point at this tree.
+          sha=$(git rev-parse HEAD)
+
+          # Matched on the macro being defined, not on the name appearing in
+          # the line: ZEROTIER_ONE_VERSION_STR mentions all three, and a
+          # substring match takes _ZT_STR(...) from it as the version.
+          read_version() {
+            awk '
+              $1=="#define" && $2=="ZEROTIER_ONE_VERSION_MAJOR"    { major=$3 }
+              $1=="#define" && $2=="ZEROTIER_ONE_VERSION_MINOR"    { minor=$3 }
+              $1=="#define" && $2=="ZEROTIER_ONE_VERSION_REVISION" { rev=$3 }
+              END {
+                if (major ~ /^[0-9]+$/ && minor ~ /^[0-9]+$/ && rev ~ /^[0-9]+$/)
+                  print major "." minor "." rev
+              }
+            ' "$1"
+          }
+
+          version=$(read_version version.h)
+          if [ -z "$version" ]; then
+            echo "could not read a version from version.h" >&2
+            exit 1
+          fi
+
+          # /releases/latest skips drafts and pre-releases, so a run of
+          # pre-releases never moves the comparison point.
+          last=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+
+          previous=""
+          if [ -n "$last" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/contents/version.h?ref=$last" \
+              -H "Accept: application/vnd.github.raw" > previous-version.h 2>/dev/null \
+              && previous=$(read_version previous-version.h) || true
+          fi
+
+          if [ -n "$previous" ] && [ "$version" = "$previous" ]; then
+            stable=false
+            tag="v$version-pre.$GITHUB_RUN_NUMBER"
+            channel=edge
+          else
+            stable=true
+            tag="v$version"
+            channel=latest
+          fi
+
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "stable=$stable"   >> "$GITHUB_OUTPUT"
+          echo "last=$last"       >> "$GITHUB_OUTPUT"
+          echo "sha=$sha"         >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<TAGS"
+            printf '%s\n' "$image:$channel" "$image:$tag" "$image:sha-${sha::7}"
+            echo "TAGS"
+          } >> "$GITHUB_OUTPUT"
+
+          # A board file asks for a tuned image by setting ZT_VARIANT.
+          boards=$(
+            for f in boards/*.conf; do
+              [ -f "$f" ] || continue
+              variant=$(sed -n 's/^ZT_VARIANT=//p' "$f" | tr -d '"')
+              platform=$(sed -n 's/^ZT_PLATFORM=//p' "$f" | tr -d '"')
+              [ -n "$variant" ] && [ -n "$platform" ] || continue
+              tune=$(sed -n 's/^ZT_TUNE=//p' "$f" | tr -d '"')
+              mk=$(sed -n 's/^ZT_MAKE=//p' "$f" | tr -d '"')
+              jq -cn --arg v "$variant" --arg p "$platform" --arg t "$tune" --arg m "$mk" \
+                '{variant:$v, platform:$p, tune:$t, make:$m}'
+            done | jq -sc .
+          )
+          echo "boards=$boards" >> "$GITHUB_OUTPUT"
+
+          echo "$tag (stable=$stable), last stable ${last:-none}" >> "$GITHUB_STEP_SUMMARY"
+          echo "board images: $boards" >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the source that plan resolved
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - name: Check out the container recipe
+        uses: actions/checkout@v4
+        with:
+          ref: compiler
+          path: .compiler
+
+      - uses: docker/setup-qemu-action@v3
+      # The default buildx driver is docker, which cannot export a cache.
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .compiler/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ needs.plan.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  tarball:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+          - platform: linux/arm/v7
+            arch: armv7
+    steps:
+      - name: Check out the source that plan resolved
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - name: Check out the container recipe
+        uses: actions/checkout@v4
+        with:
+          ref: compiler
+          path: .compiler
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Single-architecture image saved to a file, which is what an offline
+      # RouterOS device imports with /container/add file=.
+      - name: Build ${{ matrix.arch }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .compiler/Dockerfile
+          platforms: ${{ matrix.platform }}
+          tags: zerotier-one:${{ matrix.arch }}
+          outputs: type=docker,dest=zerotier-one-${{ matrix.arch }}.tar
+          cache-from: type=gha
+
+      - name: Compress
+        run: gzip -9 "zerotier-one-${{ matrix.arch }}.tar"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.arch }}
+          path: zerotier-one-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # Per-board images. A board declares itself by setting ZT_VARIANT in
+  # boards/*.conf on the source branch; no edit here is needed to add one.
+  variant:
+    needs: plan
+    if: needs.plan.outputs.boards != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: ${{ fromJSON(needs.plan.outputs.boards) }}
+    steps:
+      - name: Check out the source that plan resolved
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - name: Check out the container recipe
+        uses: actions/checkout@v4
+        with:
+          ref: compiler
+          path: .compiler
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag list
+        id: tags
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          VARIANT: ${{ matrix.board.variant }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "list<<TAGS"
+            printf '%s\n' "$image:v$VERSION-$VARIANT" "$image:$VARIANT"
+            echo "TAGS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push ${{ matrix.board.variant }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .compiler/Dockerfile
+          platforms: ${{ matrix.board.platform }}
+          build-args: |
+            ZT_TUNE=${{ matrix.board.tune }}
+            ZT_MAKE=${{ matrix.board.make }}
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Same build, cached, written to a file for offline installs.
+      - name: Save ${{ matrix.board.variant }} tarball
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .compiler/Dockerfile
+          platforms: ${{ matrix.board.platform }}
+          build-args: |
+            ZT_TUNE=${{ matrix.board.tune }}
+            ZT_MAKE=${{ matrix.board.make }}
+          tags: zerotier-one:${{ matrix.board.variant }}
+          outputs: type=docker,dest=zerotier-one-${{ matrix.board.variant }}-tuned.tar
+          cache-from: type=gha
+
+      - name: Compress
+        run: gzip -9 "zerotier-one-${{ matrix.board.variant }}-tuned.tar"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-board-${{ matrix.board.variant }}
+          path: zerotier-one-${{ matrix.board.variant }}-tuned.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: [plan, image, tarball, variant]
+    # variant is skipped when no board declares one, which must not skip the
+    # release with it.
+    if: >-
+      always()
+      && needs.image.result == 'success'
+      && needs.tarball.result == 'success'
+      && (needs.variant.result == 'success' || needs.variant.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the source that plan resolved
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+
+      - name: Write notes
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          LAST: ${{ needs.plan.outputs.last }}
+          STABLE: ${{ needs.plan.outputs.stable }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          range=""
+          if [ -n "$LAST" ] && git rev-parse -q --verify "refs/tags/$LAST" >/dev/null; then
+            range="$LAST..HEAD"
+          fi
+
+          {
+            if [ "$STABLE" = "true" ]; then
+              echo "ZeroTier One $VERSION, built from $SOURCE_BRANCH."
+            else
+              echo "Pre-release of $VERSION, built from ${SHA::7} on $SOURCE_BRANCH."
+              echo "It stays a pre-release until version.h changes."
+            fi
+            echo
+            echo '```'
+            echo "podman pull $image:$TAG"
+            echo '```'
+            echo
+            echo "Architectures: amd64, arm64, armv7. The attached tarballs are for"
+            echo "offline installs: gunzip, then /container/add file=."
+            echo
+
+            if [ -n "$range" ]; then
+              echo "## Commits since $LAST"
+              echo
+              git log --no-merges --pretty='- %s (%h)' "$range"
+              echo
+              echo "**Full changelog**: https://github.com/$GITHUB_REPOSITORY/compare/$LAST...$TAG"
+            else
+              echo "## Commits"
+              echo
+              git log --no-merges --pretty='- %s (%h)' -20
+            fi
+          } > notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          STABLE: ${{ needs.plan.outputs.stable }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$STABLE" = "true" ]; then
+            gh release create "$TAG" --target "$SHA" --title "$TAG" \
+              --notes-file notes.md --latest zerotier-one-*.tar.gz
+          else
+            gh release create "$TAG" --target "$SHA" --title "$TAG" \
+              --notes-file notes.md --prerelease zerotier-one-*.tar.gz
+          fi
